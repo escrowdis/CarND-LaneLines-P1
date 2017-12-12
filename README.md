@@ -1,56 +1,175 @@
-# **Finding Lane Lines on the Road** 
-[![Udacity - Self-Driving Car NanoDegree](https://s3.amazonaws.com/udacity-sdc/github/shield-carnd.svg)](http://www.udacity.com/drive)
+# **Finding Lane Lines on the Road**
 
-<img src="examples/laneLines_thirdPass.jpg" width="480" alt="Combined Image" />
+This is the lane line detection project by using single color camera.
 
-Overview
+[img_rgb]: ./imgs/img_rgb.png "RGB color image"
+[img_roi]: ./imgs/img_roi.png "ROI in image"
+[img_hsl_h]: ./imgs/img_hsl_h.png "Hue in HSL"
+[img_hsl_s]: ./imgs/img_hsl_s.png "Saturation in HSL"
+[img_hsl_l]: ./imgs/img_hsl_l.png "Lightness in HSL"
+[img_hsv_h]: ./imgs/img_hsv_h.png "Hue in HSV"
+[img_hsv_s]: ./imgs/img_hsv_s.png "Saturation in HSV"
+[img_hsv_v]: ./imgs/img_hsv_v.png "Value in HSV"
+[img_yellow]: ./imgs/img_yellow.png "Detection of Yellow Lane Lines"
+[img_white]: ./imgs/img_white.png "Detection of White Lane Lines"
+[img_lanes]: ./imgs/img_lanes.png "Detection of Lane Lines"
+[img_canny]: ./imgs/img_canny.png "Canny Edge Method"
+[img_hough]: ./imgs/img_hough.png "Hough Line Detection"
+[img_left_right_lanes]: ./imgs/img_left_right_lanes.png "Both Sides Lanes"
+[img_result]: ./imgs/img_result.png "Result"
+
 ---
 
-When we drive, we use our eyes to decide where to go.  The lines on the road that show us where the lanes are act as our constant reference for where to steer the vehicle.  Naturally, one of the first things we would like to do in developing a self-driving car is to automatically detect lane lines using an algorithm.
+### Reflection
 
-In this project you will detect lane lines in images using Python and OpenCV.  OpenCV means "Open-Source Computer Vision", which is a package that has many useful tools for analyzing images.  
+### 1. Describe your pipeline. As part of the description, explain how you modified the draw_lines() function.
 
-To complete the project, two files will be submitted: a file containing project code and a file containing a brief write up explaining your solution. We have included template files to be used both for the [code](https://github.com/udacity/CarND-LaneLines-P1/blob/master/P1.ipynb) and the [writeup](https://github.com/udacity/CarND-LaneLines-P1/blob/master/writeup_template.md).The code file is called P1.ipynb and the writeup template is writeup_template.md 
+My pipeline consisted of 4 steps:
+1. Cropped the ROI (region of interest) in image and converted to HSL color space
+2. Filtered out lane lines by color
+3. Detected lane lines using Canny edge and Hough line methods
+4. Distinguished left-side and right-side lane lines and averaged it to draw
 
-To meet specifications in the project, take a look at the requirements in the [project rubric](https://review.udacity.com/#!/rubrics/322/view)
+First, the images were cropped with a tuned quadrilateral to focus on related lane lines in front of.
+
+![][img_rgb]
+![][img_roi]
+
+```python
+rows = img.shape[0]
+cols = img.shape[1]
+roi_y_min = rows * 0.58
+roi_x_min = cols * 0.45
+roi_x_max = cols * 0.55
+
+vertices = np.array([[(0, rows),
+                      (roi_x_min, roi_y_min),
+                      (roi_x_max, roi_y_min),
+                      (cols, rows)]], dtype=np.int32)
+img_roi = region_of_interest(img_rgb, vertices)
+```
+
+And converted it to HSL (Hue, Saturation and Lightness) color space. I've tested to threshold out lane lines in RGB, HSV and HSL color spaces and I thought both of HSV and HSL color spaces would perform better than RGB one under different situations, such as shaded area, low light region...etc.
+
+#### Images in Different Color Space
+|     HSL      |     HSV      |
+|--------------|--------------|
+|![][img_hsl_h]|![][img_hsv_h]|
+|![][img_hsl_s]|![][img_hsv_s]|
+|![][img_hsl_l]|![][img_hsv_v]|
+
+Second, the common lane lines, color in white and yellow, were filtered out by tuned thresholding. In the image, the lane line in yellow have strong responses in saturation, and the one in white has high lightness. So the thresholding was implemented shown as below.
+
+![][img_yellow]
+![][img_white]
+![][img_lanes]
+
+```python
+# yellow lane
+y_lower = np.array([10, 0, 0])
+y_upper = np.array([50, 255, 255])
+img_y = cv2.inRange(img_hsl, y_lower, y_upper)
+
+# white lane
+w_lower = np.array([0, 200, 0])
+w_upper = np.array([255, 255, 255])
+img_w = cv2.inRange(img_hsl, w_lower, w_upper)
+
+img_result = cv2.bitwise_or(img_y, img_w)
+```
+
+Third, Canny edge and Hough line methods were used to extract the lane lines. The thresholds of Canny edge could be both 255 due to the input image was the binary image with detected lane lines. After that, the parameters of Hough line detection was adjusted to fit current situation.
+
+![][img_canny]
+![][img_hough]
+
+```python
+# Canny edge
+thresh_canny_low = 50
+thresh_canny_high = 150
+img_canny = canny(img_th, thresh_canny_low, thresh_canny_high)
+
+# Hough line detection
+rho = 1
+theta = np.pi/180
+threshold = 20
+min_line_length = 20
+max_line_gap = 20
+lines, img_hough = hough_lines(img_canny, rho, theta, threshold,
+                               min_line_length, max_line_gap)
+```
 
 
-Creating a Great Writeup
----
-For this project, a great writeup should provide a detailed response to the "Reflection" section of the [project rubric](https://review.udacity.com/#!/rubrics/322/view). There are three parts to the reflection:
+Forth, the lines have to be merged into one to represent the lane lines for each side. The lines were filtered and classified into left-side and right-side by slopes. The line fitting was implemented to find a line with minimum deviation. Finally, the lines were drawn in the ROI by finding the upper and lower point inside the ROI.
 
-1. Describe the pipeline
+![][img_left_right_lanes]
 
-2. Identify any shortcomings
+```python
+# Distinguish left- and right-side lane line
+slope_lower = 0.4
+slope_upper = 2.0
+lane_left = []
+lane_right = []
+for line in lines:
+    for x1, y1, x2, y2 in line:
+        slope = (y2 - y1) / (x2 - x1)
 
-3. Suggest possible improvements
+    # Distinguish by checking slope
+        if slope_lower <= slope <= slope_upper:
+            lane_right.append((x1, y1))
+            lane_right.append((x2, y2))
+        elif -slope_upper <= slope <= -slope_lower:
+            lane_left.append((x1, y1))
+            lane_left.append((x2, y2))
 
-We encourage using images in your writeup to demonstrate how your pipeline works.  
+# Line fitting
+def lineFitting(x, y):
+    meanx = sum(x) / len(x)
+    meany = sum(y) / len(y)
+    k = sum(( xi - meanx) * (yi - meany) for xi, yi in zip(x, y)) /
+        sum((xi - meanx)**2 for xi in x)
+    m = meany - k * meanx
+    return k, m
 
-All that said, please be concise!  We're not looking for you to write a book here: just a brief description.
+merged_line_img = np.zeros((rows, cols, 3), dtype=np.uint8)
+thick_line = 10
+color_line = [255, 0, 0]
 
-You're not required to use markdown for your writeup.  If you use another method please just submit a pdf of your writeup. Here is a link to a [writeup template file](https://github.com/udacity/CarND-LaneLines-P1/blob/master/writeup_template.md). 
+pts_left = np.array(lane_left)
+if pts_left.size:
+    slope_l, intercept_l = linear_fit(pts_left[:, 0], pts_left[:, 1])
+    pt_left_y = [roi_y_min, rows]
+    line_left_draw = np.array([[(pt_left_y[0] - intercept_l) / slope_l,
+                                 pt_left_y[0],
+                                (pt_left_y[1] - intercept_l) / slope_l,
+                                 pt_left_y[1]]]).astype(int)
+    draw_line(merged_line_img, line_left_draw, color_line, thick_line)
 
+pts_right = np.array(lane_right)
+if pts_right.size:
+    slope_r, intercept_r = linear_fit(pts_right[:, 0], pts_right[:, 1])
+    pt_right_y = [roi_y_min, rows]
+    line_right_draw = np.array([[(pt_right_y[0] - intercept_r) / slope_r,
+                                  pt_right_y[0],
+                                 (pt_right_y[1] - intercept_r) / slope_r,
+                                  pt_right_y[1]]]).astype(int)
+    draw_line(merged_line_img, line_right_draw, color_line, thick_line)
 
-The Project
----
+return weighted_img(merged_line_img, img)
+```
 
-## If you have already installed the [CarND Term1 Starter Kit](https://github.com/udacity/CarND-Term1-Starter-Kit/blob/master/README.md) you should be good to go!   If not, you should install the starter kit to get started on this project. ##
+![][img_result]
 
-**Step 1:** Set up the [CarND Term1 Starter Kit](https://classroom.udacity.com/nanodegrees/nd013/parts/fbf77062-5703-404e-b60c-95b78b2f3f9e/modules/83ec35ee-1e02-48a5-bdb7-d244bd47c2dc/lessons/8c82408b-a217-4d09-b81d-1bda4c6380ef/concepts/4f1870e0-3849-43e4-b670-12e6f2d4b7a7) if you haven't already.
+### 2. Identify potential shortcomings with your current pipeline
 
-**Step 2:** Open the code in a Jupyter Notebook
+This implementation still has lots of corner cases to be test. There are some potential shortcoming in this implementation listed as below:
 
-You will complete the project code in a Jupyter notebook.  If you are unfamiliar with Jupyter Notebooks, check out <A HREF="https://www.packtpub.com/books/content/basics-jupyter-notebook-and-python" target="_blank">Cyrille Rossant's Basics of Jupyter Notebook and Python</A> to get started.
+- The strong constraint is that the driving lane lines should be inside ROI, so this method only works on straight lanes like driving on highway.
 
-Jupyter is an Ipython notebook where you can run blocks of code and see results interactively.  All the code for this project is contained in a Jupyter notebook. To start Jupyter in your browser, use terminal to navigate to your project directory and then run the following command at the terminal prompt (be sure you've activated your Python 3 carnd-term1 environment as described in the [CarND Term1 Starter Kit](https://github.com/udacity/CarND-Term1-Starter-Kit/blob/master/README.md) installation instructions!):
+- If the lightness is inconsistent or the region was shaded, it might affect the line detection performance.
 
-`> jupyter notebook`
+- The lane lines were drawn by finding the upper and lower bound of ROI, so the line drawn on image might not fit well if there is a curve lane in front.
 
-A browser window will appear showing the contents of the current directory.  Click on the file called "P1.ipynb".  Another browser window will appear displaying the notebook.  Follow the instructions in the notebook to complete the project.  
+### 3. Suggest possible improvements to your pipeline
 
-**Step 3:** Complete the project and submit both the Ipython notebook and the project writeup
-
-## How to write a README
-A well written README file can enhance your project and portfolio.  Develop your abilities to create professional README files by completing [this free course](https://www.udacity.com/course/writing-readmes--ud777).
-
+I think using machine learning probably a good idea to detect lane lines because I am rookie in this learning-based methods. Or the image could be transform image to top-view to get further information.
