@@ -38,7 +38,7 @@ First, the images were cropped with a tuned quadrilateral to focus on related la
 ```python
 rows = img.shape[0]
 cols = img.shape[1]
-roi_y_min = rows * 0.58
+roi_y_min = rows * 0.60
 roi_x_min = cols * 0.45
 roi_x_max = cols * 0.55
 
@@ -66,7 +66,7 @@ Second, the common lane lines, color in white and yellow, were filtered out by t
 
 ```python
 # yellow lane
-y_lower = np.array([10, 0, 0])
+y_lower = np.array([15, 100, 100])
 y_upper = np.array([50, 255, 255])
 img_y = cv2.inRange(img_hsl, y_lower, y_upper)
 
@@ -100,7 +100,7 @@ lines, img_hough = hough_lines(img_canny, rho, theta, threshold,
 ```
 
 
-Forth, the lines have to be merged into one to represent the lane lines for each side. The lines were filtered and classified into left-side and right-side by slopes. The line fitting was implemented to find a line with minimum deviation. Finally, the lines were drawn in the ROI by finding the upper and lower point inside the ROI.
+Forth, the lines have to be merged into one to represent the lane lines for each side. The lines were filtered and classified into left-side and right-side by slopes. The RANSAC line fitting was implemented to find a line with minimum deviation. The detected line would be cached in case that sometimes the lane line detection might be failed, so the previous one would be drawn. Finally, the lines were drawn in the ROI by finding the upper and lower point inside the ROI.
 
 ![][img_left_right_lanes]
 
@@ -123,13 +123,63 @@ for line in lines:
             lane_left.append((x2, y2))
 
 # Line fitting
-def lineFitting(x, y):
-    meanx = sum(x) / len(x)
-    meany = sum(y) / len(y)
-    k = sum(( xi - meanx) * (yi - meany) for xi, yi in zip(x, y)) /
-        sum((xi - meanx)**2 for xi in x)
-    m = meany - k * meanx
+def FindLineModel(x, y):
+    mean_x = sum(x) / len(x)
+    mean_y = sum(y) / len(y)
+    k = sum((x_i - mean_x) * (y_i - mean_y) for x_i, y_i in zip(x, y)) / sum((x_i - mean_x)**2 for x_i in x)
+    m = mean_y - k * mean_x
+
     return k, m
+
+import sys
+def DistanceFromLine(x, y, l_slope, l_intercept):
+    dx = x - (y - l_intercept) / (l_slope + sys.float_info.epsilon)
+    dy = y - (l_slope * x + l_intercept)
+
+    return math.sqrt(dx**2 + dy**2)
+
+def LineFitting(pts):
+    n = 3
+    num_iter = 20
+    thresh = 30
+    ratio = 0.6
+    error = 1000000
+    best_slope = 1
+    best_intercept = 0    
+
+    if pts.shape[0] < n:
+        return FindLineModel(pts[:, 0], pts[:, 1])
+
+    for i in range(num_iter):
+        rnd_list = np.arange(pts.shape[0])
+        np.random.shuffle(rnd_list)
+        inlier_maybe = pts[rnd_list[:n]]
+        inlier_also = []
+        pt_others = pts[rnd_list[n:]]
+
+        l_slope, l_intercept = FindLineModel(inlier_maybe[:, 0], inlier_maybe[:, 1])
+
+        for pt in pt_others:
+            if DistanceFromLine(pt[0], pt[1], l_slope, l_intercept) < thresh:
+                inlier_also.append((pt[0], pt[1]))
+
+        inlier_also = np.array(inlier_also)
+        if inlier_also.shape[0] / pt_others.shape[0] > ratio:
+            inlier = np.row_stack((inlier_maybe, inlier_also))
+            l_s, l_i = FindLineModel(inlier[:, 0], inlier[:, 1])
+
+            err_sum = 0
+            for pt in inlier:
+                err_sum += DistanceFromLine(pt[0], pt[1], l_s, l_i)
+
+            if err_sum < error:
+                error = err_sum
+                best_slope = l_s
+                best_intercept = l_i
+
+    return best_slope, best_intercept
+
+global prev_line_right_draw, prev_line_left_draw
 
 merged_line_img = np.zeros((rows, cols, 3), dtype=np.uint8)
 thick_line = 10
@@ -137,23 +187,30 @@ color_line = [255, 0, 0]
 
 pts_left = np.array(lane_left)
 if pts_left.size:
-    slope_l, intercept_l = linear_fit(pts_left[:, 0], pts_left[:, 1])
+    slope, intercept = LineFitting(pts_left)
     pt_left_y = [roi_y_min, rows]
-    line_left_draw = np.array([[(pt_left_y[0] - intercept_l) / slope_l,
-                                 pt_left_y[0],
-                                (pt_left_y[1] - intercept_l) / slope_l,
-                                 pt_left_y[1]]]).astype(int)
+    line_left_draw = np.array([[(pt_left_y[0] - intercept) / slope, pt_left_y[0],
+                      (pt_left_y[1] - intercept) / slope, pt_left_y[1]]]).astype(int)
+    if show_debug_info:
+        print("Left line ", slope, intercept, line_left_draw)
     draw_line(merged_line_img, line_left_draw, color_line, thick_line)
+    prev_line_left_draw = line_left_draw
+else:
+    draw_line(merged_line_img, prev_line_left_draw, color_line, thick_line)
+
 
 pts_right = np.array(lane_right)
-if pts_right.size:
-    slope_r, intercept_r = linear_fit(pts_right[:, 0], pts_right[:, 1])
+if pts_left.size:
+    slope, intercept = LineFitting(pts_right)
     pt_right_y = [roi_y_min, rows]
-    line_right_draw = np.array([[(pt_right_y[0] - intercept_r) / slope_r,
-                                  pt_right_y[0],
-                                 (pt_right_y[1] - intercept_r) / slope_r,
-                                  pt_right_y[1]]]).astype(int)
+    line_right_draw = np.array([[(pt_right_y[0] - intercept) / slope, pt_right_y[0],
+                      (pt_right_y[1] - intercept) / slope, pt_right_y[1]]]).astype(int)
+    if show_debug_info:
+        print("Right line ", slope, intercept, line_right_draw)
     draw_line(merged_line_img, line_right_draw, color_line, thick_line)
+    prev_line_right_draw = line_right_draw
+else:
+    draw_line(merged_line_img, prev_line_right_draw, color_line, thick_line)
 
 return weighted_img(merged_line_img, img)
 ```
